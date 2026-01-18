@@ -75,6 +75,14 @@ CITATION_INSTRUCTION = """
 IMPORTANT: For each comment, you MUST include specific citations from the paper.
 Each citation should be an EXACT quote from the paper text (copy the exact words).
 This allows us to highlight the relevant text in the PDF.
+
+CRITICAL REQUIREMENTS FOR PAGE COVERAGE:
+1. The paper content is organized by page numbers (marked as "=== PAGE X ===").
+2. You MUST provide comments and citations from DIFFERENT pages throughout the ENTIRE paper.
+3. Include citations from early pages (1-5), middle pages, AND later pages.
+4. For each citation, specify the EXACT page number where the quote appears.
+5. Aim to have citations spread across at least 5-10 different pages of the paper.
+6. Do NOT focus only on the first few pages - review the ENTIRE document.
 """
 
 REVIEWERS = {
@@ -306,6 +314,34 @@ def extract_text_from_pdf(pdf_path: str) -> tuple[str, str, List[dict], dict]:
     
     doc.close()
     return full_text, title, pages_text, pages_data
+
+
+def get_sampled_content(full_text: str, pages_text: List[dict], max_chars: int = 40000) -> str:
+    """
+    Sample content from all pages of the paper to ensure coverage.
+    This helps the LLM generate citations from throughout the document.
+    """
+    total_pages = len(pages_text)
+    if total_pages == 0:
+        return full_text[:max_chars]
+    
+    # Calculate chars per page to distribute evenly
+    chars_per_page = max_chars // total_pages
+    
+    sampled_content = ""
+    for page_data in pages_text:
+        page_num = page_data["page"]
+        page_text = page_data["text"]
+        
+        # Take a portion of each page - ensure we get meaningful content
+        if len(page_text) <= chars_per_page:
+            sampled_content += f"\n\n=== PAGE {page_num} ===\n{page_text}"
+        else:
+            # Take beginning and end of longer pages to capture key content
+            half = chars_per_page // 2
+            sampled_content += f"\n\n=== PAGE {page_num} ===\n{page_text[:half]}\n[...]\n{page_text[-half:]}"
+    
+    return sampled_content
 
 
 def find_text_in_pdf(pdf_path: str, search_text: str, page_hint: int = None) -> List[dict]:
@@ -564,12 +600,15 @@ async def analyze_paper(review_id: str, reviewer_types: List[str] = None):
     reviewers_results = []
     highlight_id_counter = 0
     
+    # Get sampled content from all pages for better coverage
+    sampled_content = get_sampled_content(review["full_text"], review["pages_text"], max_chars=30000)
+    
     for reviewer_type in reviewer_types:
         if reviewer_type not in REVIEWERS:
             continue
         
         reviewer = REVIEWERS[reviewer_type]
-        prompt = reviewer.prompt_template.format(content=review["full_text"][:15000])
+        prompt = reviewer.prompt_template.format(content=sampled_content)
         
         try:
             result = await call_llm_api(prompt)

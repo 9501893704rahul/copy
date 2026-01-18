@@ -26,11 +26,11 @@ function App() {
   const pdfContainerRef = useRef(null)
 
   const reviewers = [
-    { type: 'editor_overview', name: 'Editor Overview', icon: '📝' },
-    { type: 'methodology_reviewer', name: 'Methodology Reviewer', icon: '🔬' },
-    { type: 'novelty_reviewer', name: 'Novelty Reviewer', icon: '💡' },
-    { type: 'clarity_reviewer', name: 'Clarity & Writing', icon: '✍️' },
-    { type: 'reproducibility_reviewer', name: 'Reproducibility', icon: '🔄' },
+    { type: 'editor_overview', name: 'Editor Overview', icon: '📝', iconBg: '#dbeafe' },
+    { type: 'methodology_reviewer', name: 'Study Design Reviewer', icon: '🔬', iconBg: '#fef3c7' },
+    { type: 'novelty_reviewer', name: 'Novelty Reviewer', icon: '💡', iconBg: '#fce7f3' },
+    { type: 'clarity_reviewer', name: 'Clarity & Writing Reviewer', icon: '✍️', iconBg: '#e0e7ff' },
+    { type: 'reproducibility_reviewer', name: 'Reproducibility Reviewer', icon: '🔄', iconBg: '#d1fae5' },
   ]
 
   const handleFileUpload = async (file) => {
@@ -268,16 +268,22 @@ function App() {
       </header>
 
       <div className="main-content">
-        {/* Sidebar - Reviewers */}
+        {/* Sidebar - Reviewers (Reviewer3 Style) */}
         <div className="sidebar">
           <div className="sidebar-header">
-            <span>👥</span>
+            <svg className="sidebar-header-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+              <circle cx="9" cy="7" r="4"></circle>
+              <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+              <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+            </svg>
             <span className="sidebar-title">Reviewers</span>
           </div>
           <div className="reviewer-list">
             {reviewers.map((reviewer) => {
               const reviewerData = reviewData?.reviewers?.find(r => r.type === reviewer.type)
               const isCompleted = reviewerData?.status === 'completed'
+              const hasWarnings = reviewerData && getReviewerComments().filter(c => c.reviewer_type === reviewer.type && c.severity === 'warning').length > 0
               
               return (
                 <div
@@ -285,62 +291,101 @@ function App() {
                   className={`reviewer-item ${selectedReviewer === reviewer.type ? 'active' : ''}`}
                   onClick={() => setSelectedReviewer(reviewer.type)}
                 >
-                  <span className="reviewer-icon">{reviewer.icon}</span>
+                  <div className="reviewer-icon-wrapper" style={{ background: reviewer.iconBg }}>
+                    <span className="reviewer-icon">{reviewer.icon}</span>
+                  </div>
                   <div className="reviewer-info">
                     <div className="reviewer-name">{reviewer.name}</div>
-                    <div className="reviewer-status">
-                      {isCompleted ? 'Completed' : 'Pending'}
-                    </div>
                   </div>
-                  {isCompleted && <span className="reviewer-check">✓</span>}
+                  {isCompleted ? (
+                    <div className="reviewer-check">✓</div>
+                  ) : (
+                    <div className="reviewer-pending"></div>
+                  )}
                 </div>
               )
             })}
           </div>
         </div>
 
-        {/* Review Panel */}
+        {/* Review Panel (Reviewer3 Style) */}
         <div className="review-panel">
           {selectedReviewer ? (
             <>
               <div className="review-header">
-                <h2 className="review-title">
-                  <span>{getSelectedReviewerInfo()?.icon}</span>
-                  {getSelectedReviewerInfo()?.name}
-                </h2>
+                <div className="review-header-left">
+                  <div className="review-status-dot"></div>
+                  <h2 className="review-title">{getSelectedReviewerInfo()?.name}</h2>
+                </div>
+                <svg className="review-header-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <polyline points="20 6 9 17 4 12"></polyline>
+                </svg>
               </div>
               <div className="review-content">
                 {getReviewerSummary() && (
-                  <p className="review-summary">{getReviewerSummary()}</p>
+                  <div className="review-summary">
+                    <p>{getReviewerSummary()}</p>
+                  </div>
                 )}
                 
-                <div className="comments-section">
-                  <h3>Comments</h3>
-                  {getReviewerComments().length > 0 ? (
-                    getReviewerComments().map((comment, idx) => (
-                      <div
-                        key={idx}
-                        id={`comment-${comment.id}`}
-                        className={`comment-card severity-${comment.severity} ${comment.highlight_rects?.length > 0 ? 'has-highlight' : ''}`}
-                        onClick={() => navigateToHighlight(comment)}
-                      >
-                        <div className="comment-header">
-                          <span className="comment-title">
-                            {comment.highlight_rects?.length > 0 && <span className="highlight-indicator">🔗</span>}
-                            {comment.title}
-                          </span>
-                          <span className="comment-page">Page {comment.page}</span>
-                        </div>
-                        {renderContentWithCitations(comment.content, comment.citations)}
-                      </div>
-                    ))
-                  ) : (
-                    <div className="empty-state">
-                      <div className="empty-state-icon">📝</div>
-                      <p>No comments from this reviewer yet</p>
-                    </div>
-                  )}
-                </div>
+                {getReviewerComments().length > 0 && (
+                  <div className="comments-section">
+                    <h3 className="comments-section-header">Comments</h3>
+                    <ol className="comments-list">
+                      {getReviewerComments().map((comment, idx) => (
+                        <li
+                          key={idx}
+                          id={`comment-${comment.id}`}
+                          className="comment-item"
+                          onClick={() => navigateToHighlight(comment)}
+                          style={{ cursor: comment.highlight_rects?.length > 0 ? 'pointer' : 'default' }}
+                        >
+                          <div className="comment-title-row">
+                            <span className="comment-number">{idx}</span>
+                            <span className="comment-title">
+                              <strong>{comment.title}</strong>
+                            </span>
+                          </div>
+                          <div className="comment-content">
+                            {comment.content}
+                            {comment.citations && comment.citations.length > 0 && (
+                              <div className="citations-list">
+                                {comment.citations.map((citation, cidx) => (
+                                  <div 
+                                    key={cidx} 
+                                    className="citation-item"
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      if (citation.highlight_id) {
+                                        const highlight = reviewData.highlights.find(h => h.id === citation.highlight_id)
+                                        if (highlight) {
+                                          setCurrentPage(highlight.page)
+                                          setActiveHighlight(highlight.id)
+                                          setTimeout(() => setActiveHighlight(null), 2000)
+                                        }
+                                      }
+                                    }}
+                                  >
+                                    <span className="citation-icon">📌</span>
+                                    <span className="citation-quote">"{citation.quote.substring(0, 80)}..."</span>
+                                    <span className="citation-page">p.{citation.page}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
+                )}
+                
+                {getReviewerComments().length === 0 && (
+                  <div className="empty-state">
+                    <div className="empty-state-icon">📝</div>
+                    <p>No comments from this reviewer yet</p>
+                  </div>
+                )}
               </div>
             </>
           ) : (
