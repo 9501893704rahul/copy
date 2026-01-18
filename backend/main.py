@@ -79,10 +79,12 @@ This allows us to highlight the relevant text in the PDF.
 CRITICAL REQUIREMENTS FOR PAGE COVERAGE:
 1. The paper content is organized by page numbers (marked as "=== PAGE X ===").
 2. You MUST provide comments and citations from DIFFERENT pages throughout the ENTIRE paper.
-3. Include citations from early pages (1-5), middle pages, AND later pages.
-4. For each citation, specify the EXACT page number where the quote appears.
-5. Aim to have citations spread across at least 5-10 different pages of the paper.
-6. Do NOT focus only on the first few pages - review the ENTIRE document.
+3. The paper has multiple pages - you MUST review ALL of them, not just the first few.
+4. Include citations from early pages (1-5), middle pages (6-15), AND later pages (16+).
+5. For each citation, specify the EXACT page number where the quote appears.
+6. Aim to have citations spread across at least 10-15 different pages of the paper.
+7. Do NOT focus only on the first few pages - review the ENTIRE document from start to finish.
+8. Make sure to include comments about the methodology, results, discussion, and conclusion sections which are typically in later pages.
 """
 
 REVIEWERS = {
@@ -316,32 +318,23 @@ def extract_text_from_pdf(pdf_path: str) -> tuple[str, str, List[dict], dict]:
     return full_text, title, pages_text, pages_data
 
 
-def get_sampled_content(full_text: str, pages_text: List[dict], max_chars: int = 40000) -> str:
+def get_sampled_content(full_text: str, pages_text: List[dict], max_chars: int = 100000) -> str:
     """
-    Sample content from all pages of the paper to ensure coverage.
-    This helps the LLM generate citations from throughout the document.
+    Include FULL content from all pages of the paper.
+    This ensures the LLM can review the entire document without truncation.
     """
     total_pages = len(pages_text)
     if total_pages == 0:
-        return full_text[:max_chars]
+        return full_text
     
-    # Calculate chars per page to distribute evenly
-    chars_per_page = max_chars // total_pages
-    
-    sampled_content = ""
+    # Include full content from all pages - no truncation
+    full_content = ""
     for page_data in pages_text:
         page_num = page_data["page"]
         page_text = page_data["text"]
-        
-        # Take a portion of each page - ensure we get meaningful content
-        if len(page_text) <= chars_per_page:
-            sampled_content += f"\n\n=== PAGE {page_num} ===\n{page_text}"
-        else:
-            # Take beginning and end of longer pages to capture key content
-            half = chars_per_page // 2
-            sampled_content += f"\n\n=== PAGE {page_num} ===\n{page_text[:half]}\n[...]\n{page_text[-half:]}"
+        full_content += f"\n\n=== PAGE {page_num} ===\n{page_text}"
     
-    return sampled_content
+    return full_content
 
 
 def find_text_in_pdf(pdf_path: str, search_text: str, page_hint: int = None) -> List[dict]:
