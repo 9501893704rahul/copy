@@ -450,7 +450,116 @@ body {
 .pdf-highlight {
   position: absolute;
   background: rgba(255, 235, 59, 0.4);
-  pointer-events: none;
+  border-radius: 2px;
+  transition: all 0.3s ease;
+}
+
+.pdf-highlight:hover {
+  background: rgba(255, 193, 7, 0.6);
+  box-shadow: 0 0 8px rgba(255, 193, 7, 0.8);
+}
+
+.pdf-highlight.active {
+  background: rgba(255, 152, 0, 0.6);
+  box-shadow: 0 0 12px rgba(255, 152, 0, 0.9);
+  animation: highlight-pulse 1s ease-in-out 2;
+}
+
+@keyframes highlight-pulse {
+  0%, 100% {
+    background: rgba(255, 152, 0, 0.6);
+    box-shadow: 0 0 12px rgba(255, 152, 0, 0.9);
+  }
+  50% {
+    background: rgba(255, 235, 59, 0.8);
+    box-shadow: 0 0 20px rgba(255, 235, 59, 1);
+  }
+}
+
+/* PDF Page Wrapper */
+.pdf-page-wrapper {
+  position: relative;
+  display: inline-block;
+}
+
+.highlights-layer {
+  z-index: 10;
+}
+
+/* Comment with highlight indicator */
+.comment-card.has-highlight {
+  cursor: pointer;
+}
+
+.comment-card.has-highlight:hover {
+  border-left-width: 4px;
+}
+
+.highlight-indicator {
+  margin-right: 6px;
+  font-size: 12px;
+}
+
+/* Comment highlight pulse animation */
+.comment-card.highlight-pulse {
+  animation: comment-pulse 0.5s ease-in-out 2;
+}
+
+@keyframes comment-pulse {
+  0%, 100% {
+    background: var(--bg-gray);
+  }
+  50% {
+    background: rgba(255, 235, 59, 0.3);
+  }
+}
+
+/* Citations */
+.citations-list {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border-color);
+}
+
+.citation-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px;
+  margin-bottom: 8px;
+  background: var(--bg-white);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+  border: 1px solid var(--border-color);
+}
+
+.citation-item:hover {
+  background: #fffde7;
+  border-color: #ffc107;
+}
+
+.citation-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.citation-quote {
+  flex: 1;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-style: italic;
+  line-height: 1.4;
+}
+
+.citation-page {
+  font-size: 11px;
+  color: var(--primary-color);
+  font-weight: 500;
+  background: #eff6ff;
+  padding: 2px 6px;
+  border-radius: 4px;
+  flex-shrink: 0;
 }
 
 /* Empty state */

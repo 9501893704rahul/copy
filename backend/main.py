@@ -1,7 +1,8 @@
 import os
 import uuid
 import json
-from typing import List, Optional
+import re
+from typing import List, Optional, Tuple
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -33,6 +34,18 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 reviews_db = {}
 
 # Models
+class HighlightRect(BaseModel):
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+    page: int
+
+class Citation(BaseModel):
+    quote: str
+    page: int
+    highlight_rects: List[HighlightRect] = []
+
 class ReviewComment(BaseModel):
     id: str
     reviewer_type: str
@@ -40,6 +53,7 @@ class ReviewComment(BaseModel):
     content: str
     page: int
     highlight_rects: Optional[List[dict]] = None
+    citations: Optional[List[Citation]] = None
     severity: str = "info"  # info, warning, error
 
 class ReviewResult(BaseModel):
@@ -56,7 +70,13 @@ class ReviewerConfig(BaseModel):
     prompt_template: str
     icon: str
 
-# Reviewer configurations
+# Reviewer configurations with citation support
+CITATION_INSTRUCTION = """
+IMPORTANT: For each comment, you MUST include specific citations from the paper.
+Each citation should be an EXACT quote from the paper text (copy the exact words).
+This allows us to highlight the relevant text in the PDF.
+"""
+
 REVIEWERS = {
     "editor_overview": ReviewerConfig(
         name="Editor Overview",
@@ -68,7 +88,7 @@ Provide a concise editorial overview that includes:
 2. Overall assessment of the manuscript quality
 3. Key strengths and weaknesses
 4. Recommendation (accept, minor revisions, major revisions, reject)
-
+""" + CITATION_INSTRUCTION + """
 Paper content:
 {content}
 
@@ -82,9 +102,15 @@ Respond in JSON format:
     "comments": [
         {{
             "title": "Comment title",
-            "content": "Detailed comment",
+            "content": "Detailed comment explaining the issue",
             "page": 1,
-            "severity": "info|warning|error"
+            "severity": "info|warning|error",
+            "citations": [
+                {{
+                    "quote": "EXACT text from the paper that this comment refers to",
+                    "page": 1
+                }}
+            ]
         }}
     ]
 }}"""
@@ -100,7 +126,7 @@ Evaluate the research methodology including:
 3. Data collection methods
 4. Statistical analysis
 5. Potential biases and limitations
-
+""" + CITATION_INSTRUCTION + """
 Paper content:
 {content}
 
@@ -113,7 +139,13 @@ Respond in JSON format:
             "title": "Comment title",
             "content": "Detailed comment about methodology",
             "page": 1,
-            "severity": "info|warning|error"
+            "severity": "info|warning|error",
+            "citations": [
+                {{
+                    "quote": "EXACT text from the paper that this comment refers to",
+                    "page": 1
+                }}
+            ]
         }}
     ]
 }}"""
@@ -128,7 +160,7 @@ Evaluate:
 2. Novel contributions to the field
 3. Comparison with existing literature
 4. Significance of findings
-
+""" + CITATION_INSTRUCTION + """
 Paper content:
 {content}
 
@@ -141,7 +173,13 @@ Respond in JSON format:
             "title": "Comment title",
             "content": "Detailed comment about novelty",
             "page": 1,
-            "severity": "info|warning|error"
+            "severity": "info|warning|error",
+            "citations": [
+                {{
+                    "quote": "EXACT text from the paper that this comment refers to",
+                    "page": 1
+                }}
+            ]
         }}
     ]
 }}"""
@@ -157,7 +195,7 @@ Evaluate:
 3. Organization and structure
 4. Figure and table quality
 5. Grammar and style issues
-
+""" + CITATION_INSTRUCTION + """
 Paper content:
 {content}
 
@@ -170,7 +208,13 @@ Respond in JSON format:
             "title": "Comment title",
             "content": "Detailed comment about clarity/writing",
             "page": 1,
-            "severity": "info|warning|error"
+            "severity": "info|warning|error",
+            "citations": [
+                {{
+                    "quote": "EXACT text from the paper that this comment refers to",
+                    "page": 1
+                }}
+            ]
         }}
     ]
 }}"""
@@ -185,7 +229,7 @@ Evaluate:
 2. Clarity of methods description
 3. Reproducibility of experiments
 4. Documentation quality
-
+""" + CITATION_INSTRUCTION + """
 Paper content:
 {content}
 
@@ -198,7 +242,13 @@ Respond in JSON format:
             "title": "Comment title",
             "content": "Detailed comment about reproducibility",
             "page": 1,
-            "severity": "info|warning|error"
+            "severity": "info|warning|error",
+            "citations": [
+                {{
+                    "quote": "EXACT text from the paper that this comment refers to",
+                    "page": 1
+                }}
+            ]
         }}
     ]
 }}"""
@@ -206,21 +256,45 @@ Respond in JSON format:
 }
 
 
-def extract_text_from_pdf(pdf_path: str) -> tuple[str, str, List[dict]]:
-    """Extract text and metadata from PDF."""
+def extract_text_from_pdf(pdf_path: str) -> tuple[str, str, List[dict], dict]:
+    """Extract text, metadata, and text positions from PDF."""
     doc = fitz.open(pdf_path)
     full_text = ""
     pages_text = []
+    pages_data = {}  # Store detailed text data with positions
     
     title = ""
     
     for page_num, page in enumerate(doc):
         text = page.get_text()
         full_text += f"\n--- Page {page_num + 1} ---\n{text}"
+        
+        # Extract text blocks with positions for highlighting
+        blocks = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)["blocks"]
+        text_instances = []
+        
+        for block in blocks:
+            if block.get("type") == 0:  # Text block
+                for line in block.get("lines", []):
+                    for span in line.get("spans", []):
+                        text_instances.append({
+                            "text": span.get("text", ""),
+                            "bbox": span.get("bbox", [0, 0, 0, 0]),
+                            "font": span.get("font", ""),
+                            "size": span.get("size", 0)
+                        })
+        
         pages_text.append({
             "page": page_num + 1,
             "text": text
         })
+        
+        pages_data[page_num + 1] = {
+            "text": text,
+            "text_instances": text_instances,
+            "width": page.rect.width,
+            "height": page.rect.height
+        }
         
         # Try to extract title from first page
         if page_num == 0:
@@ -231,7 +305,66 @@ def extract_text_from_pdf(pdf_path: str) -> tuple[str, str, List[dict]]:
                     break
     
     doc.close()
-    return full_text, title, pages_text
+    return full_text, title, pages_text, pages_data
+
+
+def find_text_in_pdf(pdf_path: str, search_text: str, page_hint: int = None) -> List[dict]:
+    """Find text in PDF and return highlight rectangles."""
+    doc = fitz.open(pdf_path)
+    highlights = []
+    
+    # Clean up search text
+    search_text = search_text.strip()
+    if len(search_text) < 5:
+        doc.close()
+        return highlights
+    
+    # Search in specific page first if hint provided, then all pages
+    pages_to_search = []
+    if page_hint and 1 <= page_hint <= len(doc):
+        pages_to_search.append(page_hint - 1)
+    pages_to_search.extend([i for i in range(len(doc)) if i != (page_hint - 1 if page_hint else -1)])
+    
+    for page_idx in pages_to_search:
+        page = doc[page_idx]
+        # Search for the text
+        text_instances = page.search_for(search_text)
+        
+        if text_instances:
+            for rect in text_instances:
+                highlights.append({
+                    "x0": rect.x0,
+                    "y0": rect.y0,
+                    "x1": rect.x1,
+                    "y1": rect.y1,
+                    "page": page_idx + 1,
+                    "width": page.rect.width,
+                    "height": page.rect.height
+                })
+            break  # Found on this page, stop searching
+    
+    # If exact match not found, try partial matching
+    if not highlights and len(search_text) > 20:
+        # Try with first 50 characters
+        partial_text = search_text[:50]
+        for page_idx in pages_to_search:
+            page = doc[page_idx]
+            text_instances = page.search_for(partial_text)
+            if text_instances:
+                for rect in text_instances:
+                    highlights.append({
+                        "x0": rect.x0,
+                        "y0": rect.y0,
+                        "x1": rect.x1,
+                        "y1": rect.y1,
+                        "page": page_idx + 1,
+                        "width": page.rect.width,
+                        "height": page.rect.height
+                    })
+                break
+    
+    doc.close()
+    return highlights
 
 
 async def call_llm_api(prompt: str) -> dict:
@@ -239,16 +372,62 @@ async def call_llm_api(prompt: str) -> dict:
     api_key = os.getenv("OPENROUTER_API_KEY", "")
     
     if not api_key:
-        # Return mock response for testing
+        # Return mock response with citations for testing highlighting feature
         return {
-            "summary": "This paper presents interesting research findings.",
-            "assessment": "The paper shows promise but needs improvements.",
+            "summary": "This paper presents interesting research findings on AI-powered paper review systems.",
+            "assessment": "The paper shows promise but needs improvements in methodology and reproducibility.",
+            "methodology_assessment": "The methodology section lacks detail on validation procedures.",
+            "novelty_assessment": "The approach is novel but builds on existing work.",
+            "clarity_assessment": "The writing is generally clear but could be more concise.",
+            "reproducibility_assessment": "More details needed for reproducibility.",
             "comments": [
                 {
-                    "title": "Sample Comment",
-                    "content": "This is a sample review comment. Configure OPENROUTER_API_KEY for real reviews.",
+                    "title": "Methodology Needs More Detail",
+                    "content": "The methodology section mentions collecting peer reviews but doesn't explain the selection criteria or validation process. More details are needed about how the 10,000 reviews were selected and preprocessed.",
                     "page": 1,
-                    "severity": "info"
+                    "severity": "warning",
+                    "citations": [
+                        {
+                            "quote": "We collected 10,000 peer reviews from open access journals",
+                            "page": 1
+                        }
+                    ]
+                },
+                {
+                    "title": "Sample Size Justification",
+                    "content": "While power analysis is mentioned, the specific parameters and rationale for the sample size should be provided.",
+                    "page": 1,
+                    "severity": "info",
+                    "citations": [
+                        {
+                            "quote": "Our sample size was determined through power analysis",
+                            "page": 1
+                        }
+                    ]
+                },
+                {
+                    "title": "Strong Results Claim",
+                    "content": "The 85% agreement rate is impressive but needs more context. What types of issues were compared? How was agreement measured?",
+                    "page": 1,
+                    "severity": "warning",
+                    "citations": [
+                        {
+                            "quote": "Our AI reviewer achieved 85% agreement with human reviewers",
+                            "page": 1
+                        }
+                    ]
+                },
+                {
+                    "title": "Novel Approach",
+                    "content": "The paper presents an interesting approach to automated paper review using AI, which addresses a real need in academic publishing.",
+                    "page": 1,
+                    "severity": "info",
+                    "citations": [
+                        {
+                            "quote": "This paper presents a novel approach to automated paper review",
+                            "page": 1
+                        }
+                    ]
                 }
             ]
         }
@@ -314,8 +493,8 @@ async def upload_pdf(file: UploadFile = File(...)):
         content = await file.read()
         await f.write(content)
     
-    # Extract text
-    full_text, title, pages_text = extract_text_from_pdf(file_path)
+    # Extract text with positions
+    full_text, title, pages_text, pages_data = extract_text_from_pdf(file_path)
     
     # Store initial review data
     reviews_db[review_id] = {
@@ -325,8 +504,10 @@ async def upload_pdf(file: UploadFile = File(...)):
         "file_path": file_path,
         "full_text": full_text,
         "pages_text": pages_text,
+        "pages_data": pages_data,
         "reviewers": [],
         "comments": [],
+        "highlights": [],  # Store all highlights
         "status": "uploaded"
     }
     
@@ -352,6 +533,7 @@ async def get_review(review_id: str):
         "title": review["title"],
         "reviewers": review["reviewers"],
         "comments": review["comments"],
+        "highlights": review.get("highlights", []),
         "status": review["status"]
     }
 
@@ -378,7 +560,9 @@ async def analyze_paper(review_id: str, reviewer_types: List[str] = None):
         reviewer_types = list(REVIEWERS.keys())
     
     all_comments = []
+    all_highlights = []
     reviewers_results = []
+    highlight_id_counter = 0
     
     for reviewer_type in reviewer_types:
         if reviewer_type not in REVIEWERS:
@@ -390,24 +574,58 @@ async def analyze_paper(review_id: str, reviewer_types: List[str] = None):
         try:
             result = await call_llm_api(prompt)
             
-            # Extract comments
+            # Extract comments with citations
             comments = result.get("comments", [])
             for i, comment in enumerate(comments):
-                comment_obj = ReviewComment(
-                    id=f"{reviewer_type}_{i}",
-                    reviewer_type=reviewer_type,
-                    title=comment.get("title", "Comment"),
-                    content=comment.get("content", ""),
-                    page=comment.get("page", 1),
-                    severity=comment.get("severity", "info")
-                )
-                all_comments.append(comment_obj.model_dump())
+                comment_citations = []
+                comment_highlights = []
+                
+                # Process citations and find highlights in PDF
+                citations = comment.get("citations", [])
+                for citation in citations:
+                    quote = citation.get("quote", "")
+                    page_hint = citation.get("page", 1)
+                    
+                    if quote:
+                        # Find the text in PDF and get highlight rectangles
+                        highlights = find_text_in_pdf(
+                            review["file_path"], 
+                            quote, 
+                            page_hint
+                        )
+                        
+                        if highlights:
+                            for h in highlights:
+                                h["id"] = f"highlight_{highlight_id_counter}"
+                                h["comment_id"] = f"{reviewer_type}_{i}"
+                                h["quote"] = quote[:100]  # Store truncated quote
+                                highlight_id_counter += 1
+                                all_highlights.append(h)
+                                comment_highlights.append(h)
+                        
+                        comment_citations.append({
+                            "quote": quote,
+                            "page": highlights[0]["page"] if highlights else page_hint,
+                            "highlight_id": highlights[0]["id"] if highlights else None
+                        })
+                
+                comment_obj = {
+                    "id": f"{reviewer_type}_{i}",
+                    "reviewer_type": reviewer_type,
+                    "title": comment.get("title", "Comment"),
+                    "content": comment.get("content", ""),
+                    "page": comment_highlights[0]["page"] if comment_highlights else comment.get("page", 1),
+                    "severity": comment.get("severity", "info"),
+                    "citations": comment_citations,
+                    "highlight_rects": comment_highlights
+                }
+                all_comments.append(comment_obj)
             
             reviewers_results.append({
                 "type": reviewer_type,
                 "name": reviewer.name,
                 "icon": reviewer.icon,
-                "summary": result.get("summary", result.get("assessment", "")),
+                "summary": result.get("summary", result.get("assessment", result.get("methodology_assessment", result.get("novelty_assessment", result.get("clarity_assessment", result.get("reproducibility_assessment", "")))))),
                 "status": "completed"
             })
         except Exception as e:
@@ -422,12 +640,14 @@ async def analyze_paper(review_id: str, reviewer_types: List[str] = None):
     # Update review
     review["reviewers"] = reviewers_results
     review["comments"] = all_comments
+    review["highlights"] = all_highlights
     review["status"] = "analyzed"
     
     return {
         "id": review_id,
         "reviewers": reviewers_results,
         "comments": all_comments,
+        "highlights": all_highlights,
         "status": "analyzed"
     }
 
