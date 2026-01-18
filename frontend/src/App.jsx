@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import axios from 'axios'
 import { Document, Page, pdfjs } from 'react-pdf'
 import 'react-pdf/dist/esm/Page/AnnotationLayer.css'
@@ -20,7 +20,10 @@ function App() {
   const [scale, setScale] = useState(1.0)
   const [pdfUrl, setPdfUrl] = useState(null)
   const [dragging, setDragging] = useState(false)
+  const [activeHighlight, setActiveHighlight] = useState(null)
+  const [pageSize, setPageSize] = useState({ width: 612, height: 792 })
   const fileInputRef = useRef(null)
+  const pdfContainerRef = useRef(null)
 
   const reviewers = [
     { type: 'editor_overview', name: 'Editor Overview', icon: '📝' },
@@ -56,7 +59,8 @@ function App() {
       
       setReviewData({
         ...uploadResponse.data,
-        ...analyzeResponse.data
+        ...analyzeResponse.data,
+        highlights: analyzeResponse.data.highlights || []
       })
 
       // Select first reviewer by default
@@ -98,6 +102,13 @@ function App() {
     setNumPages(numPages)
   }
 
+  const onPageLoadSuccess = (page) => {
+    setPageSize({
+      width: page.originalWidth,
+      height: page.originalHeight
+    })
+  }
+
   const getReviewerComments = () => {
     if (!reviewData?.comments || !selectedReviewer) return []
     return reviewData.comments.filter(c => c.reviewer_type === selectedReviewer)
@@ -115,6 +126,72 @@ function App() {
 
   const goToPage = (page) => {
     setCurrentPage(Math.max(1, Math.min(page, numPages || 1)))
+  }
+
+  // Get highlights for current page
+  const getCurrentPageHighlights = useCallback(() => {
+    if (!reviewData?.highlights) return []
+    return reviewData.highlights.filter(h => h.page === currentPage)
+  }, [reviewData, currentPage])
+
+  // Navigate to highlight and set it as active
+  const navigateToHighlight = (comment) => {
+    if (comment.highlight_rects && comment.highlight_rects.length > 0) {
+      const highlight = comment.highlight_rects[0]
+      setCurrentPage(highlight.page)
+      setActiveHighlight(highlight.id)
+      // Clear active highlight after animation
+      setTimeout(() => setActiveHighlight(null), 2000)
+    } else if (comment.page) {
+      setCurrentPage(comment.page)
+    }
+  }
+
+  // Handle highlight click - scroll to related comment
+  const handleHighlightClick = (highlight) => {
+    setActiveHighlight(highlight.id)
+    // Find and highlight the related comment
+    const commentElement = document.getElementById(`comment-${highlight.comment_id}`)
+    if (commentElement) {
+      commentElement.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      commentElement.classList.add('highlight-pulse')
+      setTimeout(() => commentElement.classList.remove('highlight-pulse'), 2000)
+    }
+  }
+
+  // Render citation with link
+  const renderContentWithCitations = (content, citations) => {
+    if (!citations || citations.length === 0) {
+      return <p className="comment-content">{content}</p>
+    }
+
+    return (
+      <div className="comment-content">
+        <p>{content}</p>
+        <div className="citations-list">
+          {citations.map((citation, idx) => (
+            <div 
+              key={idx} 
+              className="citation-item"
+              onClick={() => {
+                if (citation.highlight_id) {
+                  const highlight = reviewData.highlights.find(h => h.id === citation.highlight_id)
+                  if (highlight) {
+                    setCurrentPage(highlight.page)
+                    setActiveHighlight(highlight.id)
+                    setTimeout(() => setActiveHighlight(null), 2000)
+                  }
+                }
+              }}
+            >
+              <span className="citation-icon">📌</span>
+              <span className="citation-quote">"{citation.quote.substring(0, 80)}..."</span>
+              <span className="citation-page">p.{citation.page}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    )
   }
 
   // Upload Screen
@@ -243,14 +320,18 @@ function App() {
                     getReviewerComments().map((comment, idx) => (
                       <div
                         key={idx}
-                        className={`comment-card severity-${comment.severity}`}
-                        onClick={() => goToPage(comment.page)}
+                        id={`comment-${comment.id}`}
+                        className={`comment-card severity-${comment.severity} ${comment.highlight_rects?.length > 0 ? 'has-highlight' : ''}`}
+                        onClick={() => navigateToHighlight(comment)}
                       >
                         <div className="comment-header">
-                          <span className="comment-title">{comment.title}</span>
+                          <span className="comment-title">
+                            {comment.highlight_rects?.length > 0 && <span className="highlight-indicator">🔗</span>}
+                            {comment.title}
+                          </span>
                           <span className="comment-page">Page {comment.page}</span>
                         </div>
-                        <p className="comment-content">{comment.content}</p>
+                        {renderContentWithCitations(comment.content, comment.citations)}
                       </div>
                     ))
                   ) : (
@@ -284,20 +365,54 @@ function App() {
               <button onClick={() => goToPage(currentPage + 1)} disabled={currentPage >= numPages}>▶</button>
             </div>
           </div>
-          <div className="pdf-container">
+          <div className="pdf-container" ref={pdfContainerRef}>
             {pdfUrl && (
-              <Document
-                file={pdfUrl}
-                onLoadSuccess={onDocumentLoadSuccess}
-                loading={<div style={{ color: 'white' }}>Loading PDF...</div>}
-              >
-                <Page
-                  pageNumber={currentPage}
-                  scale={scale}
-                  renderTextLayer={true}
-                  renderAnnotationLayer={true}
-                />
-              </Document>
+              <div className="pdf-page-wrapper">
+                <Document
+                  file={pdfUrl}
+                  onLoadSuccess={onDocumentLoadSuccess}
+                  loading={<div style={{ color: 'white' }}>Loading PDF...</div>}
+                >
+                  <Page
+                    pageNumber={currentPage}
+                    scale={scale}
+                    renderTextLayer={true}
+                    renderAnnotationLayer={true}
+                    onLoadSuccess={onPageLoadSuccess}
+                  />
+                </Document>
+                {/* Highlight Overlays */}
+                <div className="highlights-layer" style={{ 
+                  position: 'absolute', 
+                  top: 0, 
+                  left: 0, 
+                  width: pageSize.width * scale,
+                  height: pageSize.height * scale,
+                  pointerEvents: 'none'
+                }}>
+                  {getCurrentPageHighlights().map((highlight, idx) => {
+                    const scaleX = scale
+                    const scaleY = scale
+                    return (
+                      <div
+                        key={highlight.id || idx}
+                        className={`pdf-highlight ${activeHighlight === highlight.id ? 'active' : ''}`}
+                        style={{
+                          position: 'absolute',
+                          left: highlight.x0 * scaleX,
+                          top: highlight.y0 * scaleY,
+                          width: (highlight.x1 - highlight.x0) * scaleX,
+                          height: (highlight.y1 - highlight.y0) * scaleY,
+                          pointerEvents: 'auto',
+                          cursor: 'pointer'
+                        }}
+                        onClick={() => handleHighlightClick(highlight)}
+                        title={highlight.quote || 'Click to see related comment'}
+                      />
+                    )
+                  })}
+                </div>
+              </div>
             )}
           </div>
         </div>
