@@ -1,0 +1,447 @@
+import os
+import uuid
+import json
+from typing import List, Optional
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+import fitz  # PyMuPDF
+import httpx
+import aiofiles
+
+app = FastAPI(title="AI Paper Review API")
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Storage directories
+UPLOAD_DIR = "uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+# In-memory storage for reviews
+reviews_db = {}
+
+# Models
+class ReviewComment(BaseModel):
+    id: str
+    reviewer_type: str
+    title: str
+    content: str
+    page: int
+    highlight_rects: Optional[List[dict]] = None
+    severity: str = "info"  # info, warning, error
+
+class ReviewResult(BaseModel):
+    id: str
+    filename: str
+    title: str
+    summary: str
+    reviewers: List[dict]
+    comments: List[ReviewComment]
+
+class ReviewerConfig(BaseModel):
+    name: str
+    description: str
+    prompt_template: str
+    icon: str
+
+# Reviewer configurations
+REVIEWERS = {
+    "editor_overview": ReviewerConfig(
+        name="Editor Overview",
+        description="Provides a high-level summary and editorial assessment",
+        icon="📝",
+        prompt_template="""You are an academic journal editor reviewing a submitted manuscript. 
+Provide a concise editorial overview that includes:
+1. A brief summary of the paper's main contribution
+2. Overall assessment of the manuscript quality
+3. Key strengths and weaknesses
+4. Recommendation (accept, minor revisions, major revisions, reject)
+
+Paper content:
+{content}
+
+Respond in JSON format:
+{{
+    "summary": "Brief summary of the paper",
+    "assessment": "Overall assessment",
+    "strengths": ["strength1", "strength2"],
+    "weaknesses": ["weakness1", "weakness2"],
+    "recommendation": "Your recommendation",
+    "comments": [
+        {{
+            "title": "Comment title",
+            "content": "Detailed comment",
+            "page": 1,
+            "severity": "info|warning|error"
+        }}
+    ]
+}}"""
+    ),
+    "methodology_reviewer": ReviewerConfig(
+        name="Methodology Reviewer",
+        description="Evaluates research methodology and study design",
+        icon="🔬",
+        prompt_template="""You are a methodology expert reviewing a research paper.
+Evaluate the research methodology including:
+1. Study design appropriateness
+2. Sample size and selection
+3. Data collection methods
+4. Statistical analysis
+5. Potential biases and limitations
+
+Paper content:
+{content}
+
+Respond in JSON format:
+{{
+    "methodology_assessment": "Overall methodology assessment",
+    "design_evaluation": "Study design evaluation",
+    "comments": [
+        {{
+            "title": "Comment title",
+            "content": "Detailed comment about methodology",
+            "page": 1,
+            "severity": "info|warning|error"
+        }}
+    ]
+}}"""
+    ),
+    "novelty_reviewer": ReviewerConfig(
+        name="Novelty Reviewer",
+        description="Assesses the originality and contribution to the field",
+        icon="💡",
+        prompt_template="""You are an expert reviewer assessing the novelty and contribution of a research paper.
+Evaluate:
+1. Originality of the research question
+2. Novel contributions to the field
+3. Comparison with existing literature
+4. Significance of findings
+
+Paper content:
+{content}
+
+Respond in JSON format:
+{{
+    "novelty_assessment": "Overall novelty assessment",
+    "contributions": ["contribution1", "contribution2"],
+    "comments": [
+        {{
+            "title": "Comment title",
+            "content": "Detailed comment about novelty",
+            "page": 1,
+            "severity": "info|warning|error"
+        }}
+    ]
+}}"""
+    ),
+    "clarity_reviewer": ReviewerConfig(
+        name="Clarity & Writing Reviewer",
+        description="Reviews writing quality, clarity, and presentation",
+        icon="✍️",
+        prompt_template="""You are an expert reviewer focusing on writing quality and clarity.
+Evaluate:
+1. Overall writing quality
+2. Clarity of explanations
+3. Organization and structure
+4. Figure and table quality
+5. Grammar and style issues
+
+Paper content:
+{content}
+
+Respond in JSON format:
+{{
+    "clarity_assessment": "Overall clarity assessment",
+    "writing_quality": "Writing quality evaluation",
+    "comments": [
+        {{
+            "title": "Comment title",
+            "content": "Detailed comment about clarity/writing",
+            "page": 1,
+            "severity": "info|warning|error"
+        }}
+    ]
+}}"""
+    ),
+    "reproducibility_reviewer": ReviewerConfig(
+        name="Reproducibility Reviewer",
+        description="Evaluates reproducibility and data availability",
+        icon="🔄",
+        prompt_template="""You are an expert reviewer focusing on reproducibility.
+Evaluate:
+1. Availability of data and code
+2. Clarity of methods description
+3. Reproducibility of experiments
+4. Documentation quality
+
+Paper content:
+{content}
+
+Respond in JSON format:
+{{
+    "reproducibility_assessment": "Overall reproducibility assessment",
+    "data_availability": "Data availability evaluation",
+    "comments": [
+        {{
+            "title": "Comment title",
+            "content": "Detailed comment about reproducibility",
+            "page": 1,
+            "severity": "info|warning|error"
+        }}
+    ]
+}}"""
+    ),
+}
+
+
+def extract_text_from_pdf(pdf_path: str) -> tuple[str, str, List[dict]]:
+    """Extract text and metadata from PDF."""
+    doc = fitz.open(pdf_path)
+    full_text = ""
+    pages_text = []
+    
+    title = ""
+    
+    for page_num, page in enumerate(doc):
+        text = page.get_text()
+        full_text += f"\n--- Page {page_num + 1} ---\n{text}"
+        pages_text.append({
+            "page": page_num + 1,
+            "text": text
+        })
+        
+        # Try to extract title from first page
+        if page_num == 0:
+            lines = text.strip().split('\n')
+            for line in lines[:5]:
+                if len(line.strip()) > 10 and len(line.strip()) < 200:
+                    title = line.strip()
+                    break
+    
+    doc.close()
+    return full_text, title, pages_text
+
+
+async def call_llm_api(prompt: str) -> dict:
+    """Call the LLM API (OpenRouter with DeepSeek)."""
+    api_key = os.getenv("OPENROUTER_API_KEY", "")
+    
+    if not api_key:
+        # Return mock response for testing
+        return {
+            "summary": "This paper presents interesting research findings.",
+            "assessment": "The paper shows promise but needs improvements.",
+            "comments": [
+                {
+                    "title": "Sample Comment",
+                    "content": "This is a sample review comment. Configure OPENROUTER_API_KEY for real reviews.",
+                    "page": 1,
+                    "severity": "info"
+                }
+            ]
+        }
+    
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        response = await client.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "deepseek/deepseek-chat",
+                "messages": [
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.7,
+                "max_tokens": 4000,
+            }
+        )
+        
+        if response.status_code != 200:
+            raise HTTPException(status_code=500, detail=f"LLM API error: {response.text}")
+        
+        result = response.json()
+        content = result["choices"][0]["message"]["content"]
+        
+        # Parse JSON from response
+        try:
+            # Try to extract JSON from the response
+            if "```json" in content:
+                json_str = content.split("```json")[1].split("```")[0]
+            elif "```" in content:
+                json_str = content.split("```")[1].split("```")[0]
+            else:
+                json_str = content
+            
+            return json.loads(json_str.strip())
+        except json.JSONDecodeError:
+            return {
+                "summary": content,
+                "comments": []
+            }
+
+
+@app.get("/")
+async def root():
+    return {"message": "AI Paper Review API", "version": "1.0.0"}
+
+
+@app.post("/api/upload")
+async def upload_pdf(file: UploadFile = File(...)):
+    """Upload a PDF file for review."""
+    if not file.filename.endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="Only PDF files are allowed")
+    
+    # Generate unique ID
+    review_id = str(uuid.uuid4())[:8]
+    
+    # Save file
+    file_path = os.path.join(UPLOAD_DIR, f"{review_id}.pdf")
+    async with aiofiles.open(file_path, 'wb') as f:
+        content = await file.read()
+        await f.write(content)
+    
+    # Extract text
+    full_text, title, pages_text = extract_text_from_pdf(file_path)
+    
+    # Store initial review data
+    reviews_db[review_id] = {
+        "id": review_id,
+        "filename": file.filename,
+        "title": title or file.filename,
+        "file_path": file_path,
+        "full_text": full_text,
+        "pages_text": pages_text,
+        "reviewers": [],
+        "comments": [],
+        "status": "uploaded"
+    }
+    
+    return {
+        "id": review_id,
+        "filename": file.filename,
+        "title": title or file.filename,
+        "pages": len(pages_text),
+        "status": "uploaded"
+    }
+
+
+@app.get("/api/reviews/{review_id}")
+async def get_review(review_id: str):
+    """Get review details."""
+    if review_id not in reviews_db:
+        raise HTTPException(status_code=404, detail="Review not found")
+    
+    review = reviews_db[review_id]
+    return {
+        "id": review["id"],
+        "filename": review["filename"],
+        "title": review["title"],
+        "reviewers": review["reviewers"],
+        "comments": review["comments"],
+        "status": review["status"]
+    }
+
+
+@app.get("/api/reviews/{review_id}/pdf")
+async def get_pdf(review_id: str):
+    """Get the PDF file."""
+    if review_id not in reviews_db:
+        raise HTTPException(status_code=404, detail="Review not found")
+    
+    file_path = reviews_db[review_id]["file_path"]
+    return FileResponse(file_path, media_type="application/pdf")
+
+
+@app.post("/api/reviews/{review_id}/analyze")
+async def analyze_paper(review_id: str, reviewer_types: List[str] = None):
+    """Run AI analysis on the paper."""
+    if review_id not in reviews_db:
+        raise HTTPException(status_code=404, detail="Review not found")
+    
+    review = reviews_db[review_id]
+    
+    if reviewer_types is None:
+        reviewer_types = list(REVIEWERS.keys())
+    
+    all_comments = []
+    reviewers_results = []
+    
+    for reviewer_type in reviewer_types:
+        if reviewer_type not in REVIEWERS:
+            continue
+        
+        reviewer = REVIEWERS[reviewer_type]
+        prompt = reviewer.prompt_template.format(content=review["full_text"][:15000])
+        
+        try:
+            result = await call_llm_api(prompt)
+            
+            # Extract comments
+            comments = result.get("comments", [])
+            for i, comment in enumerate(comments):
+                comment_obj = ReviewComment(
+                    id=f"{reviewer_type}_{i}",
+                    reviewer_type=reviewer_type,
+                    title=comment.get("title", "Comment"),
+                    content=comment.get("content", ""),
+                    page=comment.get("page", 1),
+                    severity=comment.get("severity", "info")
+                )
+                all_comments.append(comment_obj.model_dump())
+            
+            reviewers_results.append({
+                "type": reviewer_type,
+                "name": reviewer.name,
+                "icon": reviewer.icon,
+                "summary": result.get("summary", result.get("assessment", "")),
+                "status": "completed"
+            })
+        except Exception as e:
+            reviewers_results.append({
+                "type": reviewer_type,
+                "name": reviewer.name,
+                "icon": reviewer.icon,
+                "summary": f"Error: {str(e)}",
+                "status": "error"
+            })
+    
+    # Update review
+    review["reviewers"] = reviewers_results
+    review["comments"] = all_comments
+    review["status"] = "analyzed"
+    
+    return {
+        "id": review_id,
+        "reviewers": reviewers_results,
+        "comments": all_comments,
+        "status": "analyzed"
+    }
+
+
+@app.get("/api/reviewers")
+async def get_reviewers():
+    """Get available reviewer types."""
+    return [
+        {
+            "type": key,
+            "name": reviewer.name,
+            "description": reviewer.description,
+            "icon": reviewer.icon
+        }
+        for key, reviewer in REVIEWERS.items()
+    ]
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=12000)
