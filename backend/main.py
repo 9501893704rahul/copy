@@ -9,6 +9,10 @@ from pydantic import BaseModel
 import fitz  # PyMuPDF
 import httpx
 import aiofiles
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 app = FastAPI(title="AI Paper Review API")
 
