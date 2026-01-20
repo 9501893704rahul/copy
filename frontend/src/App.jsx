@@ -3,13 +3,17 @@ import axios from 'axios'
 import { Document, Page, pdfjs } from 'react-pdf'
 import 'react-pdf/dist/esm/Page/AnnotationLayer.css'
 import 'react-pdf/dist/esm/Page/TextLayer.css'
+import { useAuth, AuthProvider } from './contexts/AuthContext'
+import AuthModal from './components/AuthModal'
+import PricingModal from './components/PricingModal'
+import UserMenu from './components/UserMenu'
 
-// Set up PDF.js worker
 pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.js`
 
 const API_BASE = '/api'
 
-function App() {
+function AppContent() {
+  const { user, loading: authLoading, subscription, isConfigured } = useAuth()
   const [reviewId, setReviewId] = useState(null)
   const [reviewData, setReviewData] = useState(null)
   const [selectedReviewer, setSelectedReviewer] = useState(null)
@@ -22,20 +26,31 @@ function App() {
   const [dragging, setDragging] = useState(false)
   const [activeHighlight, setActiveHighlight] = useState(null)
   const [pageSize, setPageSize] = useState({ width: 612, height: 792 })
+  const [showAuthModal, setShowAuthModal] = useState(false)
+  const [showPricingModal, setShowPricingModal] = useState(false)
+  const [reviewsThisMonth, setReviewsThisMonth] = useState(0)
   const fileInputRef = useRef(null)
   const pdfContainerRef = useRef(null)
 
   const reviewers = [
-    { type: 'editor_overview', name: 'Editor Overview', icon: '📝', iconBg: '#dbeafe' },
-    { type: 'methodology_reviewer', name: 'Study Design Reviewer', icon: '🔬', iconBg: '#fef3c7' },
-    { type: 'novelty_reviewer', name: 'Novelty Reviewer', icon: '💡', iconBg: '#fce7f3' },
-    { type: 'clarity_reviewer', name: 'Clarity & Writing Reviewer', icon: '✍️', iconBg: '#e0e7ff' },
-    { type: 'reproducibility_reviewer', name: 'Reproducibility Reviewer', icon: '🔄', iconBg: '#d1fae5' },
+    { type: 'editor_overview', name: 'Editor Overview', icon: '📝', iconBg: 'bg-blue-100', description: 'High-level editorial assessment' },
+    { type: 'methodology_reviewer', name: 'Methodology', icon: '🔬', iconBg: 'bg-amber-100', description: 'Research design evaluation' },
+    { type: 'novelty_reviewer', name: 'Novelty', icon: '💡', iconBg: 'bg-pink-100', description: 'Originality assessment' },
+    { type: 'clarity_reviewer', name: 'Clarity & Writing', icon: '✍️', iconBg: 'bg-indigo-100', description: 'Writing quality review' },
+    { type: 'reproducibility_reviewer', name: 'Reproducibility', icon: '🔄', iconBg: 'bg-emerald-100', description: 'Reproducibility check' },
   ]
+
+  const FREE_REVIEWS_LIMIT = 3
+  const canReview = !isConfigured || !user || subscription?.plan_id === 'pro' || subscription?.plan_id === 'team' || reviewsThisMonth < FREE_REVIEWS_LIMIT
 
   const handleFileUpload = async (file) => {
     if (!file || !file.name.endsWith('.pdf')) {
       alert('Please upload a PDF file')
+      return
+    }
+
+    if (!canReview) {
+      setShowPricingModal(true)
       return
     }
 
@@ -54,7 +69,6 @@ function App() {
 
       setLoadingMessage('Analyzing paper with AI reviewers...')
 
-      // Run analysis
       const analyzeResponse = await axios.post(`${API_BASE}/reviews/${id}/analyze`)
       
       setReviewData({
@@ -63,10 +77,11 @@ function App() {
         highlights: analyzeResponse.data.highlights || []
       })
 
-      // Select first reviewer by default
       if (analyzeResponse.data.reviewers?.length > 0) {
         setSelectedReviewer(analyzeResponse.data.reviewers[0].type)
       }
+
+      setReviewsThisMonth(prev => prev + 1)
 
     } catch (error) {
       console.error('Error:', error)
@@ -128,29 +143,24 @@ function App() {
     setCurrentPage(Math.max(1, Math.min(page, numPages || 1)))
   }
 
-  // Get highlights for current page
   const getCurrentPageHighlights = useCallback(() => {
     if (!reviewData?.highlights) return []
     return reviewData.highlights.filter(h => h.page === currentPage)
   }, [reviewData, currentPage])
 
-  // Navigate to highlight and set it as active
   const navigateToHighlight = (comment) => {
     if (comment.highlight_rects && comment.highlight_rects.length > 0) {
       const highlight = comment.highlight_rects[0]
       setCurrentPage(highlight.page)
       setActiveHighlight(highlight.id)
-      // Clear active highlight after animation
       setTimeout(() => setActiveHighlight(null), 2000)
     } else if (comment.page) {
       setCurrentPage(comment.page)
     }
   }
 
-  // Handle highlight click - scroll to related comment
   const handleHighlightClick = (highlight) => {
     setActiveHighlight(highlight.id)
-    // Find and highlight the related comment
     const commentElement = document.getElementById(`comment-${highlight.comment_id}`)
     if (commentElement) {
       commentElement.scrollIntoView({ behavior: 'smooth', block: 'center' })
@@ -159,90 +169,126 @@ function App() {
     }
   }
 
-  // Render citation with link
-  const renderContentWithCitations = (content, citations) => {
-    if (!citations || citations.length === 0) {
-      return <p className="comment-content">{content}</p>
-    }
-
-    return (
-      <div className="comment-content">
-        <p>{content}</p>
-        <div className="citations-list">
-          {citations.map((citation, idx) => (
-            <div 
-              key={idx} 
-              className="citation-item"
-              onClick={() => {
-                if (citation.highlight_id) {
-                  const highlight = reviewData.highlights.find(h => h.id === citation.highlight_id)
-                  if (highlight) {
-                    setCurrentPage(highlight.page)
-                    setActiveHighlight(highlight.id)
-                    setTimeout(() => setActiveHighlight(null), 2000)
-                  }
-                }
-              }}
-            >
-              <span className="citation-icon">📌</span>
-              <span className="citation-quote">"{citation.quote.substring(0, 80)}..."</span>
-              <span className="citation-page">p.{citation.page}</span>
-            </div>
-          ))}
-        </div>
-      </div>
-    )
-  }
-
   // Upload Screen
   if (!reviewId) {
     return (
       <div className="app-container">
         <header className="header">
           <div className="logo">
-            <span className="logo-icon">📄</span>
-            <span>AI Paper Review</span>
+            <div className="logo-icon-wrapper">
+              <span className="logo-icon">📄</span>
+            </div>
+            <span className="logo-text">AI Paper Review</span>
+          </div>
+          <div className="header-actions">
+            {isConfigured && !user ? (
+              <>
+                <button className="btn btn-ghost" onClick={() => setShowPricingModal(true)}>
+                  Pricing
+                </button>
+                <button className="btn btn-primary" onClick={() => setShowAuthModal(true)}>
+                  Sign In
+                </button>
+              </>
+            ) : user ? (
+              <>
+                <button className="btn btn-ghost" onClick={() => setShowPricingModal(true)}>
+                  {subscription?.plan_id === 'pro' || subscription?.plan_id === 'team' ? 'Manage Plan' : 'Upgrade'}
+                </button>
+                <UserMenu onOpenPricing={() => setShowPricingModal(true)} />
+              </>
+            ) : null}
           </div>
         </header>
 
-        <div className="upload-screen">
-          <div className="upload-container">
-            <h1 className="upload-title">AI-Powered Paper Review</h1>
-            <p className="upload-subtitle">
-              Upload your research paper and get instant feedback from multiple AI reviewers
+        <div className="hero-section">
+          <div className="hero-content">
+            <div className="hero-badge">
+              <span className="hero-badge-icon">✨</span>
+              <span>Powered by Advanced AI</span>
+            </div>
+            <h1 className="hero-title">
+              Get Expert Feedback on Your
+              <span className="hero-title-highlight"> Research Paper</span>
+            </h1>
+            <p className="hero-subtitle">
+              Upload your paper and receive instant, comprehensive reviews from 5 specialized AI reviewers. 
+              Improve your research before submission.
             </p>
 
-            <div
-              className={`upload-dropzone ${dragging ? 'dragging' : ''}`}
-              onDrop={handleDrop}
-              onDragOver={handleDragOver}
-              onDragLeave={handleDragLeave}
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <div className="upload-icon">📤</div>
-              <p className="upload-text">Drop your PDF here or click to browse</p>
-              <p className="upload-hint">Supports PDF files up to 50MB</p>
+            <div className="upload-section">
+              <div
+                className={`upload-dropzone ${dragging ? 'dragging' : ''}`}
+                onDrop={handleDrop}
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <div className="upload-icon-wrapper">
+                  <svg className="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <polyline points="17 8 12 3 7 8" />
+                    <line x1="12" y1="3" x2="12" y2="15" />
+                  </svg>
+                </div>
+                <p className="upload-text">
+                  <span className="upload-text-primary">Click to upload</span> or drag and drop
+                </p>
+                <p className="upload-hint">PDF files up to 50MB</p>
+              </div>
+
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".pdf"
+                onChange={handleFileSelect}
+                style={{ display: 'none' }}
+              />
+
+              {isConfigured && !user && (
+                <p className="upload-limit-notice">
+                  <span className="upload-limit-icon">ℹ️</span>
+                  {FREE_REVIEWS_LIMIT - reviewsThisMonth} free reviews remaining. 
+                  <button onClick={() => setShowAuthModal(true)}>Sign in</button> to track your usage.
+                </p>
+              )}
             </div>
 
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".pdf"
-              onChange={handleFileSelect}
-              style={{ display: 'none' }}
-            />
+            <div className="features-grid">
+              {reviewers.slice(0, 3).map((reviewer) => (
+                <div key={reviewer.type} className="feature-card">
+                  <div className={`feature-icon ${reviewer.iconBg}`}>
+                    <span>{reviewer.icon}</span>
+                  </div>
+                  <h3>{reviewer.name}</h3>
+                  <p>{reviewer.description}</p>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
 
         {loading && (
           <div className="loading-overlay">
             <div className="loading-card">
-              <div className="loading-spinner" style={{ width: 40, height: 40, borderWidth: 3 }}></div>
+              <div className="loading-spinner-wrapper">
+                <div className="loading-spinner"></div>
+              </div>
               <h3>{loadingMessage}</h3>
               <p>This may take a minute...</p>
+              <div className="loading-progress">
+                <div className="loading-progress-bar"></div>
+              </div>
             </div>
           </div>
         )}
+
+        <AuthModal isOpen={showAuthModal} onClose={() => setShowAuthModal(false)} />
+        <PricingModal 
+          isOpen={showPricingModal} 
+          onClose={() => setShowPricingModal(false)} 
+          onAuthRequired={() => { setShowPricingModal(false); setShowAuthModal(true); }}
+        />
       </div>
     )
   }
@@ -252,8 +298,10 @@ function App() {
     <div className="app-container">
       <header className="header">
         <div className="logo">
-          <span className="logo-icon">📄</span>
-          <span>AI Paper Review</span>
+          <div className="logo-icon-wrapper">
+            <span className="logo-icon">📄</span>
+          </div>
+          <span className="logo-text">AI Paper Review</span>
         </div>
         <div className="header-actions">
           <button className="btn btn-secondary" onClick={() => {
@@ -262,13 +310,18 @@ function App() {
             setPdfUrl(null)
             setSelectedReviewer(null)
           }}>
-            ← Upload New Paper
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
+              <line x1="19" y1="12" x2="5" y2="12"></line>
+              <polyline points="12 19 5 12 12 5"></polyline>
+            </svg>
+            New Review
           </button>
+          {user && <UserMenu onOpenPricing={() => setShowPricingModal(true)} />}
         </div>
       </header>
 
       <div className="main-content">
-        {/* Sidebar - Reviewers (Reviewer3 Style) */}
+        {/* Sidebar - Reviewers */}
         <div className="sidebar">
           <div className="sidebar-header">
             <svg className="sidebar-header-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -277,13 +330,13 @@ function App() {
               <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
               <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
             </svg>
-            <span className="sidebar-title">Reviewers</span>
+            <span className="sidebar-title">AI Reviewers</span>
           </div>
           <div className="reviewer-list">
             {reviewers.map((reviewer) => {
               const reviewerData = reviewData?.reviewers?.find(r => r.type === reviewer.type)
               const isCompleted = reviewerData?.status === 'completed'
-              const hasWarnings = reviewerData && getReviewerComments().filter(c => c.reviewer_type === reviewer.type && c.severity === 'warning').length > 0
+              const commentCount = reviewData?.comments?.filter(c => c.reviewer_type === reviewer.type).length || 0
               
               return (
                 <div
@@ -291,14 +344,19 @@ function App() {
                   className={`reviewer-item ${selectedReviewer === reviewer.type ? 'active' : ''}`}
                   onClick={() => setSelectedReviewer(reviewer.type)}
                 >
-                  <div className="reviewer-icon-wrapper" style={{ background: reviewer.iconBg }}>
+                  <div className={`reviewer-icon-wrapper ${reviewer.iconBg}`}>
                     <span className="reviewer-icon">{reviewer.icon}</span>
                   </div>
                   <div className="reviewer-info">
                     <div className="reviewer-name">{reviewer.name}</div>
+                    <div className="reviewer-comment-count">{commentCount} comments</div>
                   </div>
                   {isCompleted ? (
-                    <div className="reviewer-check">✓</div>
+                    <div className="reviewer-check">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+                        <polyline points="20 6 9 17 4 12"></polyline>
+                      </svg>
+                    </div>
                   ) : (
                     <div className="reviewer-pending"></div>
                   )}
@@ -308,75 +366,81 @@ function App() {
           </div>
         </div>
 
-        {/* Review Panel (Reviewer3 Style) */}
+        {/* Review Panel */}
         <div className="review-panel">
           {selectedReviewer ? (
             <>
               <div className="review-header">
                 <div className="review-header-left">
-                  <div className="review-status-dot"></div>
-                  <h2 className="review-title">{getSelectedReviewerInfo()?.name}</h2>
+                  <div className={`review-icon-wrapper ${getSelectedReviewerInfo()?.iconBg}`}>
+                    <span>{getSelectedReviewerInfo()?.icon}</span>
+                  </div>
+                  <div>
+                    <h2 className="review-title">{getSelectedReviewerInfo()?.name}</h2>
+                    <p className="review-subtitle">{getSelectedReviewerInfo()?.description}</p>
+                  </div>
                 </div>
-                <svg className="review-header-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <polyline points="20 6 9 17 4 12"></polyline>
-                </svg>
               </div>
               <div className="review-content">
                 {getReviewerSummary() && (
                   <div className="review-summary">
+                    <h3 className="review-summary-title">Summary</h3>
                     <p>{getReviewerSummary()}</p>
                   </div>
                 )}
                 
                 {getReviewerComments().length > 0 && (
                   <div className="comments-section">
-                    <h3 className="comments-section-header">Comments</h3>
-                    <ol className="comments-list">
+                    <h3 className="comments-section-header">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="18" height="18">
+                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                      </svg>
+                      Comments ({getReviewerComments().length})
+                    </h3>
+                    <div className="comments-list">
                       {getReviewerComments().map((comment, idx) => (
-                        <li
+                        <div
                           key={idx}
                           id={`comment-${comment.id}`}
-                          className="comment-item"
+                          className={`comment-card severity-${comment.severity}`}
                           onClick={() => navigateToHighlight(comment)}
-                          style={{ cursor: comment.highlight_rects?.length > 0 ? 'pointer' : 'default' }}
                         >
-                          <div className="comment-title-row">
-                            <span className="comment-number">{idx}</span>
-                            <span className="comment-title">
-                              <strong>{comment.title}</strong>
-                            </span>
-                          </div>
-                          <div className="comment-content">
-                            {comment.content}
-                            {comment.citations && comment.citations.length > 0 && (
-                              <div className="citations-list">
-                                {comment.citations.map((citation, cidx) => (
-                                  <div 
-                                    key={cidx} 
-                                    className="citation-item"
-                                    onClick={(e) => {
-                                      e.stopPropagation()
-                                      if (citation.highlight_id) {
-                                        const highlight = reviewData.highlights.find(h => h.id === citation.highlight_id)
-                                        if (highlight) {
-                                          setCurrentPage(highlight.page)
-                                          setActiveHighlight(highlight.id)
-                                          setTimeout(() => setActiveHighlight(null), 2000)
-                                        }
-                                      }
-                                    }}
-                                  >
-                                    <span className="citation-icon">📌</span>
-                                    <span className="citation-quote">"{citation.quote.substring(0, 80)}..."</span>
-                                    <span className="citation-page">p.{citation.page}</span>
-                                  </div>
-                                ))}
-                              </div>
+                          <div className="comment-header">
+                            <span className="comment-number">{idx + 1}</span>
+                            <h4 className="comment-title">{comment.title}</h4>
+                            {comment.page && (
+                              <span className="comment-page">p.{comment.page}</span>
                             )}
                           </div>
-                        </li>
+                          <p className="comment-content">{comment.content}</p>
+                          {comment.citations && comment.citations.length > 0 && (
+                            <div className="citations-list">
+                              {comment.citations.map((citation, cidx) => (
+                                <div 
+                                  key={cidx} 
+                                  className="citation-item"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    if (citation.highlight_id) {
+                                      const highlight = reviewData.highlights.find(h => h.id === citation.highlight_id)
+                                      if (highlight) {
+                                        setCurrentPage(highlight.page)
+                                        setActiveHighlight(highlight.id)
+                                        setTimeout(() => setActiveHighlight(null), 2000)
+                                      }
+                                    }
+                                  }}
+                                >
+                                  <span className="citation-icon">📌</span>
+                                  <span className="citation-quote">"{citation.quote.substring(0, 80)}..."</span>
+                                  <span className="citation-page">p.{citation.page}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
                       ))}
-                    </ol>
+                    </div>
                   </div>
                 )}
                 
@@ -401,78 +465,94 @@ function App() {
           <div className="pdf-toolbar">
             <span className="pdf-title">{reviewData?.title || 'Document'}</span>
             <div className="pdf-controls">
-              <button onClick={() => setScale(s => Math.max(0.5, s - 0.1))}>−</button>
+              <button onClick={() => setScale(s => Math.max(0.5, s - 0.1))} title="Zoom out">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
+                  <circle cx="11" cy="11" r="8"></circle>
+                  <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                  <line x1="8" y1="11" x2="14" y2="11"></line>
+                </svg>
+              </button>
               <span className="zoom-display">{Math.round(scale * 100)}%</span>
-              <button onClick={() => setScale(s => Math.min(2, s + 0.1))}>+</button>
-              <span style={{ margin: '0 8px', color: '#888' }}>|</span>
-              <button onClick={() => goToPage(currentPage - 1)} disabled={currentPage <= 1}>◀</button>
-              <span className="zoom-display">{currentPage} / {numPages || '?'}</span>
-              <button onClick={() => goToPage(currentPage + 1)} disabled={currentPage >= numPages}>▶</button>
+              <button onClick={() => setScale(s => Math.min(2, s + 0.1))} title="Zoom in">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
+                  <circle cx="11" cy="11" r="8"></circle>
+                  <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                  <line x1="11" y1="8" x2="11" y2="14"></line>
+                  <line x1="8" y1="11" x2="14" y2="11"></line>
+                </svg>
+              </button>
+              <div className="pdf-divider"></div>
+              <button onClick={() => goToPage(currentPage - 1)} disabled={currentPage <= 1}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
+                  <polyline points="15 18 9 12 15 6"></polyline>
+                </svg>
+              </button>
+              <span className="page-display">{currentPage} / {numPages || '?'}</span>
+              <button onClick={() => goToPage(currentPage + 1)} disabled={currentPage >= numPages}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
+                  <polyline points="9 18 15 12 9 6"></polyline>
+                </svg>
+              </button>
             </div>
           </div>
           <div className="pdf-container" ref={pdfContainerRef}>
             {pdfUrl && (
-              <div className="pdf-page-wrapper">
-                <Document
-                  file={pdfUrl}
-                  onLoadSuccess={onDocumentLoadSuccess}
-                  loading={<div style={{ color: 'white' }}>Loading PDF...</div>}
-                >
+              <Document
+                file={pdfUrl}
+                onLoadSuccess={onDocumentLoadSuccess}
+                loading={
+                  <div className="pdf-loading">
+                    <div className="loading-spinner"></div>
+                    <p>Loading PDF...</p>
+                  </div>
+                }
+              >
+                <div className="pdf-page-wrapper">
                   <Page
                     pageNumber={currentPage}
                     scale={scale}
+                    onLoadSuccess={onPageLoadSuccess}
                     renderTextLayer={true}
                     renderAnnotationLayer={true}
-                    onLoadSuccess={onPageLoadSuccess}
                   />
-                </Document>
-                {/* Highlight Overlays */}
-                <div className="highlights-layer" style={{ 
-                  position: 'absolute', 
-                  top: 0, 
-                  left: 0, 
-                  width: pageSize.width * scale,
-                  height: pageSize.height * scale,
-                  pointerEvents: 'none'
-                }}>
-                  {getCurrentPageHighlights().map((highlight, idx) => {
-                    const scaleX = scale
-                    const scaleY = scale
-                    return (
+                  <div className="highlights-layer">
+                    {getCurrentPageHighlights().map((highlight, idx) => (
                       <div
-                        key={highlight.id || idx}
+                        key={idx}
                         className={`pdf-highlight ${activeHighlight === highlight.id ? 'active' : ''}`}
                         style={{
-                          position: 'absolute',
-                          left: highlight.x0 * scaleX,
-                          top: highlight.y0 * scaleY,
-                          width: (highlight.x1 - highlight.x0) * scaleX,
-                          height: (highlight.y1 - highlight.y0) * scaleY,
-                          pointerEvents: 'auto',
-                          cursor: 'pointer'
+                          left: `${(highlight.x0 / highlight.width) * 100}%`,
+                          top: `${(highlight.y0 / highlight.height) * 100}%`,
+                          width: `${((highlight.x1 - highlight.x0) / highlight.width) * 100}%`,
+                          height: `${((highlight.y1 - highlight.y0) / highlight.height) * 100}%`,
                         }}
                         onClick={() => handleHighlightClick(highlight)}
-                        title={highlight.quote || 'Click to see related comment'}
+                        title="Click to see related comment"
                       />
-                    )
-                  })}
+                    ))}
+                  </div>
                 </div>
-              </div>
+              </Document>
             )}
           </div>
         </div>
       </div>
 
-      {loading && (
-        <div className="loading-overlay">
-          <div className="loading-card">
-            <div className="loading-spinner" style={{ width: 40, height: 40, borderWidth: 3 }}></div>
-            <h3>{loadingMessage}</h3>
-            <p>This may take a minute...</p>
-          </div>
-        </div>
-      )}
+      <AuthModal isOpen={showAuthModal} onClose={() => setShowAuthModal(false)} />
+      <PricingModal 
+        isOpen={showPricingModal} 
+        onClose={() => setShowPricingModal(false)} 
+        onAuthRequired={() => { setShowPricingModal(false); setShowAuthModal(true); }}
+      />
     </div>
+  )
+}
+
+function App() {
+  return (
+    <AuthProvider>
+      <AppContent />
+    </AuthProvider>
   )
 }
 

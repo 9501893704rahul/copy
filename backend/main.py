@@ -3,7 +3,8 @@ import uuid
 import json
 import re
 from typing import List, Optional, Tuple
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from datetime import datetime
+from fastapi import FastAPI, UploadFile, File, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -32,6 +33,13 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # In-memory storage for reviews
 reviews_db = {}
+
+# Supabase configuration
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
+
+# Polar.sh webhook secret
+POLAR_WEBHOOK_SECRET = os.getenv("POLAR_WEBHOOK_SECRET", "")
 
 # Models
 class HighlightRect(BaseModel):
@@ -696,6 +704,140 @@ async def get_reviewers():
         }
         for key, reviewer in REVIEWERS.items()
     ]
+
+
+# Polar.sh webhook models
+class PolarWebhookPayload(BaseModel):
+    event: str
+    data: dict
+
+
+@app.post("/api/webhooks/polar")
+async def polar_webhook(payload: PolarWebhookPayload, x_polar_signature: str = Header(None)):
+    """Handle Polar.sh webhooks for subscription events."""
+    
+    # In production, verify the webhook signature
+    # For now, we'll process the webhook directly
+    
+    event = payload.event
+    data = payload.data
+    
+    if event == "subscription.created" or event == "subscription.updated":
+        # Extract subscription data
+        customer_email = data.get("customer", {}).get("email")
+        plan_id = data.get("product", {}).get("id")
+        status = data.get("status")
+        
+        if customer_email and SUPABASE_URL and SUPABASE_SERVICE_KEY:
+            # Update subscription in Supabase
+            async with httpx.AsyncClient() as client:
+                # First, find the user by email
+                user_response = await client.get(
+                    f"{SUPABASE_URL}/auth/v1/admin/users",
+                    headers={
+                        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                        "apikey": SUPABASE_SERVICE_KEY
+                    },
+                    params={"email": customer_email}
+                )
+                
+                if user_response.status_code == 200:
+                    users = user_response.json().get("users", [])
+                    if users:
+                        user_id = users[0]["id"]
+                        
+                        # Upsert subscription record
+                        await client.post(
+                            f"{SUPABASE_URL}/rest/v1/subscriptions",
+                            headers={
+                                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                                "apikey": SUPABASE_SERVICE_KEY,
+                                "Content-Type": "application/json",
+                                "Prefer": "resolution=merge-duplicates"
+                            },
+                            json={
+                                "user_id": user_id,
+                                "plan_id": plan_id,
+                                "status": status,
+                                "polar_subscription_id": data.get("id"),
+                                "updated_at": datetime.utcnow().isoformat()
+                            }
+                        )
+        
+        return {"status": "processed"}
+    
+    elif event == "subscription.canceled":
+        customer_email = data.get("customer", {}).get("email")
+        
+        if customer_email and SUPABASE_URL and SUPABASE_SERVICE_KEY:
+            async with httpx.AsyncClient() as client:
+                # Update subscription status to canceled
+                await client.patch(
+                    f"{SUPABASE_URL}/rest/v1/subscriptions",
+                    headers={
+                        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                        "apikey": SUPABASE_SERVICE_KEY,
+                        "Content-Type": "application/json"
+                    },
+                    params={"polar_subscription_id": f"eq.{data.get('id')}"},
+                    json={"status": "canceled"}
+                )
+        
+        return {"status": "processed"}
+    
+    return {"status": "ignored"}
+
+
+@app.get("/api/user/subscription")
+async def get_user_subscription(authorization: str = Header(None)):
+    """Get current user's subscription status."""
+    
+    if not authorization or not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return {"subscription": None}
+    
+    try:
+        token = authorization.replace("Bearer ", "")
+        
+        async with httpx.AsyncClient() as client:
+            # Verify the token and get user
+            user_response = await client.get(
+                f"{SUPABASE_URL}/auth/v1/user",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "apikey": SUPABASE_SERVICE_KEY
+                }
+            )
+            
+            if user_response.status_code != 200:
+                return {"subscription": None}
+            
+            user = user_response.json()
+            user_id = user.get("id")
+            
+            # Get subscription
+            sub_response = await client.get(
+                f"{SUPABASE_URL}/rest/v1/subscriptions",
+                headers={
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                    "apikey": SUPABASE_SERVICE_KEY
+                },
+                params={
+                    "user_id": f"eq.{user_id}",
+                    "status": "eq.active",
+                    "select": "*"
+                }
+            )
+            
+            if sub_response.status_code == 200:
+                subs = sub_response.json()
+                if subs:
+                    return {"subscription": subs[0]}
+            
+            return {"subscription": None}
+            
+    except Exception as e:
+        print(f"Error getting subscription: {e}")
+        return {"subscription": None}
 
 
 if __name__ == "__main__":
